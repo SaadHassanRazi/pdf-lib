@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
 import {
-  Save,
   Image,
   Type,
   Download,
@@ -12,31 +11,21 @@ import {
   AlignLeft,
   AlignCenter,
   AlignRight,
-  Camera,
 } from "lucide-react";
 import * as _ from "lodash";
 import { Rnd } from "react-rnd";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 
-// Mock PDF generation functionality (using jsPDF in actual implementation)
-// In real scenario, you would import jsPDF and pdf-lib as needed
-const mockPdfLib = {
-  generatePdf: (content) => {
-    console.log("Generating PDF with content:", content);
-    // In a real implementation, this would use jsPDF to create a PDF
-    const blob = new Blob(["PDF data"], { type: "application/pdf" });
-    return URL.createObjectURL(blob);
-  },
-};
-
 // PDF Editor Component
 export default function PDFEditor() {
   const imageUploadRef = useRef(null);
   const [uploadingImageId, setUploadingImageId] = useState(null);
+  const [pages, setPages] = useState([[]]); // Page 0 starts with empty array of elements
+  const [currentPage, setCurrentPage] = useState(0);
+  const [isExporting, setIsExporting] = useState(false); // New state for loading indicator
 
   // State for managing PDF content
-  const [elements, setElements] = useState([]);
   const [selectedElement, setSelectedElement] = useState(null);
   const [canvasSize, setCanvasSize] = useState({ width: 595, height: 842 }); // A4 size in pixels
   const canvasRef = useRef(null);
@@ -52,29 +41,32 @@ export default function PDFEditor() {
 
   // Function to add a new text element
   const addTextElement = () => {
-    const padding = 100; // Safe margin
-    const newX = Math.min(canvasSize.width - padding, 100);
-    const newY = Math.min(canvasSize.height - padding, 100);
-
     const newElement = {
       id: Date.now(),
       type: "text",
-      placeholder: "Write text here...",
-      x: newX,
-      y: newY,
-      fontSize: textOptions.fontSize,
-      fontFamily: textOptions.fontFamily,
-      bold: textOptions.bold,
-      italic: textOptions.italic,
-      align: textOptions.align,
+      content: "Edit this text",
+      x: 100,
+      y: 100,
+      ...textOptions,
     };
-    setElements([...elements, newElement]);
-    setSelectedElement(newElement.id);
+
+    setPages((prev) => {
+      const updated = [...prev];
+      updated[currentPage] = [...updated[currentPage], newElement];
+      return updated;
+    });
+  };
+
+  const addNewPage = () => {
+    setPages((prev) => {
+      const updated = [...prev, []];
+      setCurrentPage(updated.length - 1); // correct index after update
+      return updated;
+    });
   };
 
   // Function to add an image element
   const addImageElement = () => {
-    // In a real app, this would open a file picker
     const newElement = {
       id: Date.now(),
       type: "image",
@@ -84,9 +76,13 @@ export default function PDFEditor() {
       width: 200,
       height: 150,
     };
-    setElements([...elements, newElement]);
-    setSelectedElement(newElement.id);
+    setPages((prev) => {
+      const updated = [...prev];
+      updated[currentPage] = [...updated[currentPage], newElement];
+      return updated;
+    });
   };
+
   const handleImageUpload = (e) => {
     const file = e.target.files[0];
     if (file && uploadingImageId) {
@@ -100,17 +96,21 @@ export default function PDFEditor() {
 
   // Function to handle element updates
   const updateElement = (id, updates) => {
-    setElements(
-      elements.map((el) => (el.id === id ? { ...el, ...updates } : el))
+    const updatedPages = [...pages];
+    updatedPages[currentPage] = updatedPages[currentPage].map((el) =>
+      el.id === id ? { ...el, ...updates } : el
     );
+    setPages(updatedPages);
   };
 
   // Function to delete the selected element
   const deleteElement = () => {
-    if (selectedElement) {
-      setElements(elements.filter((el) => el.id !== selectedElement));
-      setSelectedElement(null);
-    }
+    const updatedPages = [...pages];
+    updatedPages[currentPage] = updatedPages[currentPage].filter(
+      (el) => el.id !== selectedElement
+    );
+    setPages(updatedPages);
+    setSelectedElement(null);
   };
 
   // Handle mousedown on element
@@ -138,7 +138,9 @@ export default function PDFEditor() {
         const dx = e.clientX - dragStart.x;
         const dy = e.clientY - dragStart.y;
 
-        const element = elements.find((el) => el.id === selectedElement);
+        const currentElements = pages[currentPage] || [];
+        const element = currentElements.find((el) => el.id === selectedElement);
+
         if (element) {
           updateElement(selectedElement, {
             x: element.x + dx,
@@ -162,36 +164,59 @@ export default function PDFEditor() {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [isDragging, dragStart, selectedElement, elements]);
+  }, [isDragging, dragStart, selectedElement]);
 
   // Handle export to PDF
   const exportToPDF = async () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
+    setIsExporting(true);
     try {
-      const canvasImage = await html2canvas(canvas);
-      const imgData = canvasImage.toDataURL("image/png");
-
       const pdf = new jsPDF({
         orientation: "portrait",
         unit: "px",
         format: [canvasSize.width, canvasSize.height],
       });
 
-      pdf.addImage(imgData, "PNG", 0, 0);
+      // Store the original page to restore it later
+      const originalPage = currentPage;
+
+      // Iterate through all pages
+      for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+        // Switch to the current page to render its content
+        setCurrentPage(pageIndex);
+
+        // Wait for the UI to update (React may need a tick to re-render)
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          console.error(`Canvas not found for page ${pageIndex + 1}`);
+          continue;
+        }
+
+        // Capture the canvas as an image
+        const canvasImage = await html2canvas(canvas, {
+          scale: 2, // Increase resolution for better quality
+          useCORS: true, // Handle cross-origin images if any
+        });
+        const imgData = canvasImage.toDataURL("image/png");
+
+        // Add the image to the PDF
+        if (pageIndex > 0) {
+          pdf.addPage();
+        }
+        pdf.addImage(imgData, "PNG", 0, 0, canvasSize.width, canvasSize.height);
+      }
+
+      // Restore the original page
+      setCurrentPage(originalPage);
+
+      // Save the PDF
       pdf.save("document.pdf");
     } catch (err) {
       console.error("PDF generation error:", err);
+    } finally {
+      setIsExporting(false);
     }
-
-    // Create a download link
-    const link = document.createElement("a");
-    link.href = pdfUrl;
-    link.download = "document.pdf";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
   };
 
   return (
@@ -223,13 +248,44 @@ export default function PDFEditor() {
             </button>
           )}
         </div>
+        <div className="flex items-center justify-between p-2 bg-white shadow">
+          <button
+            onClick={() => setCurrentPage(Math.max(currentPage - 1, 0))}
+            disabled={currentPage === 0}
+            className="p-2 bg-gray-300 rounded disabled:opacity-50"
+          >
+            Previous
+          </button>
+          <span>
+            Page {currentPage + 1} of {pages.length}
+          </span>
+          <button
+            onClick={() =>
+              setCurrentPage(Math.min(currentPage + 1, pages.length - 1))
+            }
+            disabled={currentPage === pages.length - 1}
+            className="p-2 bg-gray-300 rounded disabled:opacity-50"
+          >
+            Next
+          </button>
+          <button
+            onClick={addNewPage}
+            className="p-2 bg-blue-500 text-white rounded"
+          >
+            Add Page
+          </button>
+        </div>
 
         {/* Export */}
         <button
           onClick={exportToPDF}
-          className="p-2 bg-purple-600 text-white rounded flex items-center"
+          disabled={isExporting}
+          className={`p-2 bg-purple-600 text-white rounded flex items-center ${
+            isExporting ? "opacity-50" : ""
+          }`}
         >
-          <Download size={16} className="mr-1" /> Export PDF
+          <Download size={16} className="mr-1" />
+          {isExporting ? "Exporting..." : "Export PDF"}
         </button>
       </div>
       <input
@@ -242,7 +298,8 @@ export default function PDFEditor() {
 
       {/* Text Formatting Toolbar - Only visible when a text element is selected */}
       {selectedElement &&
-        elements.find((el) => el.id === selectedElement)?.type === "text" && (
+        pages[currentPage].find((el) => el.id === selectedElement)?.type ===
+          "text" && (
           <div className="bg-gray-200 p-2 flex items-center space-x-4">
             <select
               value={textOptions.fontFamily}
@@ -356,16 +413,15 @@ export default function PDFEditor() {
           onMouseDown={handleCanvasMouseDown}
         >
           {/* Render all elements */}
-          {elements.map((element) => {
+          {pages[currentPage].map((element) => {
             const isSelected = element.id === selectedElement;
 
-            9999;
             if (element.type === "text") {
               return (
                 <div
                   key={element.id}
                   className={`absolute cursor-move ${
-                    isSelected ? "outline  outline-blue-500" : ""
+                    isSelected ? "outline outline-blue-500" : ""
                   }`}
                   style={{
                     left: `${element.x}px`,
@@ -381,8 +437,8 @@ export default function PDFEditor() {
                         if (el) {
                           el.style.height = "auto"; // Reset height
                           el.style.height = el.scrollHeight + "px"; // Expand height
-                          el.style.width = "auto"; // Optional: Reset width
-                          el.style.width = el.scrollWidth + "px"; // Optional: Expand width
+                          el.style.width = "auto"; // Reset width
+                          el.style.width = el.scrollWidth + "px"; // Expand width
                         }
                       }}
                       value={element.content}
@@ -453,7 +509,7 @@ export default function PDFEditor() {
                     background: "#f3f4f6",
                     cursor: "move",
                   }}
-                    >
+                >
                   {element.src && element.src.startsWith("data:image") ? (
                     <img
                       src={element.src}
