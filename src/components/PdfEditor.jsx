@@ -22,6 +22,7 @@ import { Rnd } from "react-rnd";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import * as pdfjsLib from "pdfjs-dist/build/pdf";
+import { PDFDocument } from "pdf-lib";
 
 // Set pdf.js worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js";
@@ -30,6 +31,7 @@ export default function PDFEditor() {
   const imageUploadRef = useRef(null);
   const pdfUploadRef = useRef(null);
   const textareaRef = useRef(null);
+  const mergeInputRef = useRef(null);
   const [uploadingImageId, setUploadingImageId] = useState(null);
   const [pages, setPages] = useState([[]]);
   const [currentPage, setCurrentPage] = useState(0);
@@ -55,6 +57,8 @@ export default function PDFEditor() {
   const [isEditing, setIsEditing] = useState(false); // State to track editing mode
   const [editingContent, setEditingContent] = useState(""); // New state to track current editing content
   const backgroundUpdateTimeout = useRef(null); // For debouncing
+  const [mergeFiles, setMergeFiles] = useState([]);
+  const [splitPage, setSplitPage] = useState(1);
 
   // Sanitize text to remove invisible characters
   const sanitizeText = (text) => {
@@ -755,6 +759,101 @@ export default function PDFEditor() {
     }
   };
 
+  const handleMergePDFs = async () => {
+    try {
+      const mergedPdf = await PDFDocument.create();
+
+      for (const file of mergeFiles) {
+        const pdfBytes = await file.arrayBuffer();
+        const pdf = await PDFDocument.load(pdfBytes);
+        const copiedPages = await mergedPdf.copyPages(
+          pdf,
+          pdf.getPageIndices()
+        );
+        copiedPages.forEach((page) => mergedPdf.addPage(page));
+      }
+
+      const mergedPdfFile = await mergedPdf.save();
+      const blob = new Blob([mergedPdfFile], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "merged-document.pdf";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      setMergeFiles([]); // Reset merge files
+    } catch (error) {
+      console.error("Error merging PDFs:", error);
+      alert("Error merging PDFs. Please try again.");
+    }
+  };
+
+  const handleSplitPDF = async () => {
+    if (!pdfDocument) {
+      alert("Please import a PDF first");
+      return;
+    }
+
+    try {
+      const numPages = pdfDocument.numPages;
+
+      // Create two new PDF documents
+      const firstHalf = await PDFDocument.create();
+      const secondHalf = await PDFDocument.create();
+
+      // Get the current PDF as bytes
+      const pdfBytes = await pdfDocument.getData();
+      const originalPdf = await PDFDocument.load(pdfBytes);
+
+      // Split at the specified page
+      const splitAt = Math.min(splitPage, numPages);
+
+      // Copy pages to first document
+      for (let i = 0; i < splitAt; i++) {
+        const [page] = await firstHalf.copyPages(originalPdf, [i]);
+        firstHalf.addPage(page);
+      }
+
+      // Copy pages to second document
+      for (let i = splitAt; i < numPages; i++) {
+        const [page] = await secondHalf.copyPages(originalPdf, [i]);
+        secondHalf.addPage(page);
+      }
+
+      // Save both parts
+      const firstHalfBytes = await firstHalf.save();
+      const secondHalfBytes = await secondHalf.save();
+
+      // Download both parts
+      const downloadPart = async (pdfBytes, filename) => {
+        const blob = new Blob([pdfBytes], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      };
+
+      await downloadPart(firstHalfBytes, "part1.pdf");
+      await downloadPart(secondHalfBytes, "part2.pdf");
+    } catch (error) {
+      console.error("Error splitting PDF:", error);
+      alert("Error splitting PDF. Please try again.");
+    }
+  };
+
+  const handleMergeFileSelect = (e) => {
+    const files = Array.from(e.target.files);
+    setMergeFiles((prev) => [...prev, ...files]);
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-100">
       {/* Toolbar */}
@@ -837,6 +936,58 @@ export default function PDFEditor() {
           <Download size={16} className="mr-1" />
           {isExporting ? "Exporting..." : "Export PDF"}
         </button>
+
+        <div className="flex items-center space-x-2">
+          {/* Existing toolbar buttons */}
+          <div className="border-l border-gray-300 mx-2 h-6" />
+
+          {/* Merge PDFs */}
+          <div className="flex items-center">
+            <input
+              type="file"
+              accept="application/pdf"
+              multiple
+              ref={mergeInputRef}
+              onChange={handleMergeFileSelect}
+              style={{ display: "none" }}
+            />
+            <button
+              onClick={() => mergeInputRef.current.click()}
+              className="p-2 bg-indigo-500 text-white rounded flex items-center"
+              disabled={isImportingPDF || isExporting}
+            >
+              <Upload size={16} className="mr-1" />
+              Add Files to Merge
+            </button>
+            {mergeFiles.length > 0 && (
+              <button
+                onClick={handleMergePDFs}
+                className="p-2 ml-2 bg-indigo-600 text-white rounded flex items-center"
+              >
+                Merge {mergeFiles.length} PDFs
+              </button>
+            )}
+          </div>
+
+          {/* Split PDF */}
+          <div className="flex items-center">
+            <input
+              type="number"
+              min="1"
+              max={pdfDocument ? pdfDocument.numPages : 1}
+              value={splitPage}
+              onChange={(e) => setSplitPage(parseInt(e.target.value))}
+              className="w-16 p-1 border rounded"
+            />
+            <button
+              onClick={handleSplitPDF}
+              className="p-2 ml-2 bg-orange-500 text-white rounded flex items-center"
+              disabled={!pdfDocument || isImportingPDF || isExporting}
+            >
+              Split at Page
+            </button>
+          </div>
+        </div>
       </div>
       <input
         type="file"
@@ -851,6 +1002,13 @@ export default function PDFEditor() {
         ref={pdfUploadRef}
         style={{ display: "none" }}
         onChange={handlePDFUpload}
+      />
+      <input
+        type="file"
+        accept="application/pdf"
+        ref={mergeInputRef}
+        style={{ display: "none" }}
+        onChange={handleMergeFileSelect}
       />
 
       {/* Text Formatting Toolbar */}
